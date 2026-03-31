@@ -947,6 +947,10 @@ app.get("/set_webhook", async (req, res) => {
 
 // CRON Endpoint for Vercel: Ping this URL every 1 minute via cron-job.org
 app.get("/cron", async (req, res) => {
+  // IMPORTANT: Respond immediately — Vercel kills functions after 10s and
+  // cron-job.org times out after 30s. We send 200 first, then do all work.
+  res.status(200).send("Cron triggered.");
+
   try {
     let polledCount = 0;
 

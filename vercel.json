@@ -1,11 +1,5 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "ra.js",
-      "use": "@vercel/node"
-    }
-  ],
   "functions": {
     "ra.js": {
       "maxDuration": 30

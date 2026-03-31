@@ -920,13 +920,18 @@ app.get("/", (req, res) => {
 
 // The endpoint Telegram will hit with updates
 app.post("/webhook", async (req, res) => {
+  // Always respond 200 immediately so Telegram doesn't retry
+  res.sendStatus(200);
   try {
+    // On cold start, load approved users from Firebase before handling any command
+    // This ensures /approve'd users are never lost after Vercel restarts
+    if (!isApprovedUsersLoaded && SINGLE_FIREBASE_URL) {
+      await loadApprovedUsersFromDB(SINGLE_FIREBASE_URL);
+    }
     await handleUpdate(req.body);
   } catch (err) {
     console.error("handleUpdate error:", err.message);
   }
-  // Always respond with 200 OK so Telegram doesn't retry infinitely
-  res.sendStatus(200);
 });
 
 // Helper to set Webhook dynamically (Call this manually once or via Vercel deploy hook if URL is known)
@@ -951,32 +956,21 @@ app.get("/cron", async (req, res) => {
   // cron-job.org times out after 30s. We send 200 first, then do all work.
   res.status(200).send("Cron triggered.");
 
+  // Run polling in background AFTER response is sent (no more double-send errors)
   try {
-    let polledCount = 0;
-
-    // Approach 1: Stateless check (Using Hardcoded Firebase URL)
+    // Approach 1: Stateless check (Using Hardcoded Firebase URL from .env)
     if (SINGLE_FIREBASE_URL && SINGLE_ADMIN_CHAT_ID) {
       await pollFirebaseIteration(SINGLE_ADMIN_CHAT_ID, SINGLE_FIREBASE_URL);
-      polledCount++;
     }
 
-    // Approach 2: Stateful check (In-memory users)
+    // Approach 2: Stateful check (In-memory users, if any)
     const activeChats = Object.keys(firebaseUrls);
     for (const chatId of activeChats) {
-      // Don't double-poll if the hardcoded match is also in memory
       if (SINGLE_ADMIN_CHAT_ID == chatId && SINGLE_FIREBASE_URL == firebaseUrls[chatId]) continue;
-
       await pollFirebaseIteration(chatId, firebaseUrls[chatId]);
-      polledCount++;
     }
-
-    if (polledCount === 0) {
-      return res.status(200).send("Cron executed: No active Firebase monitors.");
-    }
-
-    res.status(200).send(`Cron executed: Polled ${polledCount} Firebase databases.`);
   } catch (err) {
-    res.status(500).send(`Cron error: ${err.message}`);
+    console.error("Cron polling error:", err.message);
   }
 });
 

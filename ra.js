@@ -716,7 +716,7 @@ async function handleUpdate(u) {
   }
 
   // -------- Owner-only approval commands --------
-  if (lowerText.startsWith("/approve")) {
+  if (lowerText.startsWith("/approve ") || lowerText === "/approve") {
     if (!isOwner(chatId)) {
       await sendMsg(chatId, "❌ Only owners can approve users.");
       return;

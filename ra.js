@@ -404,6 +404,13 @@ async function pollFirebaseIteration(chatId, baseUrl) {
   const newHashes = new Set(); // Collect all NEW hashes this run
 
   for (const [path, obj] of nodes) {
+    const ts = getRawTimestamp(obj);
+    
+    // 🔥 BULLETPROOF FIX: Ignore any SMS older than 24 hours to permanently block historical spam
+    if (ts > 0 && (Date.now() - ts) > 24 * 60 * 60 * 1000) {
+      continue;
+    }
+
     const h = computeHash(path, obj);
     if (seen.has(h)) continue; // Already sent — skip!
 

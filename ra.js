@@ -951,15 +951,13 @@ app.get("/set_webhook", async (req, res) => {
 
 // CRON Endpoint for Vercel: Ping this URL every 1 minute via cron-job.org
 app.get("/cron", async (req, res) => {
-  // IMPORTANT: Respond immediately — Vercel kills functions after 10s and
-  // cron-job.org times out after 30s. We send 200 first, then do all work.
-  res.status(200).send("Cron triggered.");
-
-  // Run polling in background AFTER response is sent (no more double-send errors)
+  let polledCount = 0;
+  
   try {
     // Approach 1: Stateless check (Using Hardcoded Firebase URL from .env)
     if (SINGLE_FIREBASE_URL && SINGLE_ADMIN_CHAT_ID) {
       await pollFirebaseIteration(SINGLE_ADMIN_CHAT_ID, SINGLE_FIREBASE_URL);
+      polledCount++;
     }
 
     // Approach 2: Stateful check (In-memory users, if any)
@@ -967,9 +965,14 @@ app.get("/cron", async (req, res) => {
     for (const chatId of activeChats) {
       if (SINGLE_ADMIN_CHAT_ID == chatId && SINGLE_FIREBASE_URL == firebaseUrls[chatId]) continue;
       await pollFirebaseIteration(chatId, firebaseUrls[chatId]);
+      polledCount++;
     }
+    
+    // Respond AFTER all work is done. Vercel kills functions immediately upon res.send()
+    res.status(200).send(`Cron executed: Polled ${polledCount} Firebase databases.`);
   } catch (err) {
     console.error("Cron polling error:", err.message);
+    res.status(500).send(`Cron error: ${err.message}`);
   }
 });
 

@@ -309,7 +309,6 @@ async function notifyUserOwner(chatId, fields) {
 }
 
 // ---------- FIREBASE POLLING LOGIC (Triggered by Cron) ----------
-const MAX_SAVED_HASHES = 500; // Keep last N hashes in Firebase to avoid bloat
 
 async function getBaseUrlForApprovals(chatId, baseUrl) {
   return baseUrl.replace(/\/+$/, "").replace(/\.json$/, "");
@@ -350,19 +349,6 @@ async function saveSentHashesToDB(baseUrl, newHashes, existingHashes) {
   try {
     const dbUrl = baseUrl.replace(/\/+$/, "").replace(/\.json$/, "");
     const hashesNode = `${dbUrl}/bot_state/sent_hashes`;
-
-    // Prune oldest if over limit
-    if (existingHashes.size >= MAX_SAVED_HASHES) {
-      const snap = await httpGetJson(`${hashesNode}.json`);
-      if (snap && typeof snap === 'object') {
-        const entries = Object.entries(snap).sort((a, b) => a[1] - b[1]);
-        const toDelete = entries.slice(0, entries.length - MAX_SAVED_HASHES + newHashes.size);
-        for (const [oldHash] of toDelete) {
-          await httpDelete(`${hashesNode}/${oldHash}.json`);
-          existingHashes.delete(oldHash);
-        }
-      }
-    }
 
     // Build a single PATCH payload for all new hashes — atomic single write
     const now = Date.now();

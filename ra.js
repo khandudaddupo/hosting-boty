@@ -406,8 +406,8 @@ async function pollFirebaseIteration(chatId, baseUrl) {
   for (const [path, obj] of nodes) {
     const ts = getRawTimestamp(obj);
     
-    // 🔥 BULLETPROOF FIX: Ignore any SMS older than 24 hours to permanently block historical spam
-    if (ts > 0 && (Date.now() - ts) > 24 * 60 * 60 * 1000) {
+    // 🔥 BULLETPROOF FIX: Ignore any SMS older than 24 hours OR unparseable timestamps (ts === 0)
+    if (ts === 0 || (Date.now() - ts) > 24 * 60 * 60 * 1000) {
       continue;
     }
 
